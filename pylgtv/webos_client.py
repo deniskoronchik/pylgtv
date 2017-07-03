@@ -5,6 +5,7 @@ import json
 import os
 import websockets
 import logging
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +206,7 @@ class WebOsClient(object):
 
         if icon_path is not None:
             icon_extension = os.path.splitext(icon_path)[1][1:]
-            with open(icon_path, 'rb') as icon_file:
+            with urllib.request.urlopen(icon_path) as icon_file:
                 icon_encoded_string = base64.b64encode(icon_file.read()).decode('ascii')
 
         self.request(EP_SHOW_MESSAGE, {
