@@ -396,7 +396,5 @@ class WebOsClient(object):
         self.request(EP_CLOSE_WEB_APP)
 
     # System
-    def create_toast(self, message):
-        self.request(EP_CREATE_TOAST, {
-            'message': message
-        })
+    def show_message(self, message, icon_path=None):
+        self.send_message(message, icon_path)
