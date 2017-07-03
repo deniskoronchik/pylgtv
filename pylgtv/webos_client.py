@@ -23,6 +23,7 @@ class PyLGTVPairException(Exception):
 
 
 class WebOsClient(object):
+    @asyncio.coroutine
     def __init__(self, ip, key_file_path=None, timeout_connect=2):
         """Initialize the client."""
         self.ip = ip
@@ -44,6 +45,13 @@ class WebOsClient(object):
             return os.path.join(os.getenv(USER_HOME), KEY_FILE_NAME)
 
         return os.path.join(os.getcwd(), KEY_FILE_NAME)
+
+    def get_url(self):
+        return "ws://{}:{}".format(self.ip, self.port)
+
+    def get_cid(self):
+        self.command_count += 1
+        return "{}_{}".format(type, self.command_count)
 
     def load_key_file(self):
         """Try to load the client key for the current ip."""
@@ -119,22 +127,22 @@ class WebOsClient(object):
     @asyncio.coroutine
     def _register(self):
         """Register wrapper."""
-        logger.debug('register on %s', "ws://{}:{}".format(self.ip, self.port));
+        logger.debug('register on %s', self.get_url());
         try:
-            websocket = yield from websockets.connect(
-                "ws://{}:{}".format(self.ip, self.port), timeout=self.timeout_connect)
+            websocket = yield from websockets.connect(self.get_url(),
+                timeout=self.timeout_connect)
 
         except:
-            logger.error('register failed to connect to %s', "ws://{}:{}".format(self.ip, self.port));
+            logger.error('register failed to connect to %s', self.get_url());
             return False
 
-        logger.debug('register websocket connected to %s', "ws://{}:{}".format(self.ip, self.port));
+        logger.debug('register websocket connected to %s', self.get_url());
 
         try:
             yield from self._send_register_payload(websocket)
 
         finally:
-            logger.debug('close register connection to %s', "ws://{}:{}".format(self.ip, self.port));
+            logger.debug('close register connection to %s', self.get_url());
             yield from websocket.close()
 
     def register(self):
@@ -146,15 +154,15 @@ class WebOsClient(object):
     @asyncio.coroutine
     def _command(self, msg):
         """Send a command to the tv."""
-        logger.debug('send command to %s', "ws://{}:{}".format(self.ip, self.port));
+        logger.debug('send command to %s', self.get_url());
         try:
             websocket = yield from websockets.connect(
-                "ws://{}:{}".format(self.ip, self.port), timeout=self.timeout_connect)
+                self.get_url(), timeout=self.timeout_connect)
         except:
-            logger.debug('command failed to connect to %s', "ws://{}:{}".format(self.ip, self.port));
+            logger.debug('command failed to connect to %s', self.get_url());
             return False
 
-        logger.debug('command websocket connected to %s', "ws://{}:{}".format(self.ip, self.port));
+        logger.debug('command websocket connected to %s', self.get_url());
 
         try:
             yield from self._send_register_payload(websocket)
@@ -169,18 +177,17 @@ class WebOsClient(object):
                 self.last_response = json.loads(raw_response)
 
         finally:
-            logger.debug('close command connection to %s', "ws://{}:{}".format(self.ip, self.port));
+            logger.debug('close command connection to %s', self.get_url());
             yield from websocket.close()
 
     def command(self, request_type, uri, payload):
         """Build and send a command."""
-        self.command_count += 1
 
         if payload is None:
             payload = {}
 
         message = {
-            'id': "{}_{}".format(type, self.command_count),
+            'id': self.get_cid(),
             'type': request_type,
             'uri': "ssap://{}".format(uri),
             'payload': payload,
