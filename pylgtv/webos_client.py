@@ -6,6 +6,7 @@ import os
 import websockets
 import logging
 import urllib.request
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,24 @@ USER_HOME = 'HOME'
 HANDSHAKE_FILE_NAME = 'handshake.json'
 
 
+def CreateWebOsClient(ip, key_file_path=None, timeout_connect=2, unique_id=0):
+    loop = asyncio.get_event_loop() 
+    waiter = asyncio.wait_for(CreateWebOsClientImpl(ip, key_file_path,timeout_connect, unique_id), timeout_connect)   
+    client = loop.run_until_complete(waiter)
+    client.register(client.web_socket)
+    client.register(client.web_socket_sub)
+    return client
+
+@asyncio.coroutine
+def CreateWebOsClientImpl(ip, key_file_path, timeout_connect, unique_id):
+    client = WebOsClient(ip, key_file_path=key_file_path, timeout_connect=timeout_connect, unique_id=unique_id)
+    client.web_socket = yield from websockets.connect(
+        client.get_url(), timeout=client.timeout_connect)
+    client.web_socket_sub = yield from websockets.connect(
+        client.get_url(), timeout=client.timeout_connect)
+
+    return client
+
 class PyLGTVPairException(Exception):
     def __init__(self, id, message):
         self.id = id
@@ -23,17 +42,20 @@ class PyLGTVPairException(Exception):
 
 
 class WebOsClient(object):
-    @asyncio.coroutine
-    def __init__(self, ip, key_file_path=None, timeout_connect=2):
+    
+    def __init__(self, ip, key_file_path, timeout_connect, unique_id):
         """Initialize the client."""
         self.ip = ip
         self.port = 3000
         self.key_file_path = key_file_path
         self.client_key = None
         self.web_socket = None
+        self.web_socket_sub = None
         self.command_count = 0
         self.last_response = None
         self.timeout_connect = timeout_connect
+        self.unique_id = unique_id
+        self.subscribe_callbacks = {}
 
         self.load_key_file()
 
@@ -51,7 +73,7 @@ class WebOsClient(object):
 
     def get_cid(self):
         self.command_count += 1
-        return "{}_{}".format(type, self.command_count)
+        return "{}_{}".format(self.unique_id, self.command_count)
 
     def load_key_file(self):
         """Try to load the client key for the current ip."""
@@ -62,7 +84,7 @@ class WebOsClient(object):
             key_file_path = self._get_key_file_path()
         key_dict = {}
 
-        logger.debug('load keyfile from %s', key_file_path);
+        logger.debug('load keyfile from %s', key_file_path)
 
         if os.path.isfile(key_file_path):
             with open(key_file_path, 'r') as f:
@@ -70,7 +92,7 @@ class WebOsClient(object):
                 if raw_data:
                     key_dict = json.loads(raw_data)
 
-        logger.debug('getting client_key for %s from %s', self.ip, key_file_path);
+        logger.debug('getting client_key for %s from %s', self.ip, key_file_path)
         if self.ip in key_dict:
             self.client_key = key_dict[self.ip]
 
@@ -84,7 +106,7 @@ class WebOsClient(object):
         else:
             key_file_path = self._get_key_file_path()
 
-        logger.debug('save keyfile to %s', key_file_path);
+        logger.debug('save keyfile to %s', key_file_path)
 
         with open(key_file_path, 'w+') as f:
             raw_data = f.read()
@@ -98,7 +120,7 @@ class WebOsClient(object):
             f.write(json.dumps(key_dict))
 
     @asyncio.coroutine
-    def _send_register_payload(self, websocket):
+    def _send_register_payload(self, web_socket):
         """Send the register payload."""
         file = os.path.join(os.path.dirname(__file__), HANDSHAKE_FILE_NAME)
 
@@ -108,13 +130,12 @@ class WebOsClient(object):
         handshake = json.loads(raw_handshake)
         handshake['payload']['client-key'] = self.client_key
 
-        yield from websocket.send(json.dumps(handshake))
-        raw_response = yield from websocket.recv()
+        yield from web_socket.send(json.dumps(handshake))
+        raw_response = yield from web_socket.recv()
         response = json.loads(raw_response)
 
-        if response['type'] == 'response' and \
-                        response['payload']['pairingType'] == 'PROMPT':
-            raw_response = yield from websocket.recv()
+        if response['type'] == 'response' and response['payload']['pairingType'] == 'PROMPT':
+            raw_response = yield from web_socket.recv()
             response = json.loads(raw_response)
             if response['type'] == 'registered':
                 self.client_key = response['payload']['client-key']
@@ -125,60 +146,29 @@ class WebOsClient(object):
         return self.client_key is not None
 
     @asyncio.coroutine
-    def _register(self):
+    def _register(self, web_socket):
         """Register wrapper."""
-        logger.debug('register on %s', self.get_url());
-        try:
-            websocket = yield from websockets.connect(self.get_url(),
-                timeout=self.timeout_connect)
+        logger.debug('register on %s', self.get_url())
+        yield from self._send_register_payload(web_socket)
+        
+        if not self.client_key:
+            raise PyLGTVPairException("Unable to pair")
 
-        except:
-            logger.error('register failed to connect to %s', self.get_url());
-            return False
-
-        logger.debug('register websocket connected to %s', self.get_url());
-
-        try:
-            yield from self._send_register_payload(websocket)
-
-        finally:
-            logger.debug('close register connection to %s', self.get_url());
-            yield from websocket.close()
-
-    def register(self):
+    def register(self, web_socket):
         """Pair client with tv."""
-        loop = asyncio.new_event_loop()
+        loop = asyncio.get_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(self._register())
+        loop.run_until_complete(self._register(web_socket))
 
     @asyncio.coroutine
     def _command(self, msg):
         """Send a command to the tv."""
-        logger.debug('send command to %s', self.get_url());
-        try:
-            websocket = yield from websockets.connect(
-                self.get_url(), timeout=self.timeout_connect)
-        except:
-            logger.debug('command failed to connect to %s', self.get_url());
-            return False
+        logger.debug('send command to %s', self.get_url())
+        yield from self.web_socket.send(json.dumps(msg))
 
-        logger.debug('command websocket connected to %s', self.get_url());
-
-        try:
-            yield from self._send_register_payload(websocket)
-
-            if not self.client_key:
-                raise PyLGTVPairException("Unable to pair")
-
-            yield from websocket.send(json.dumps(msg))
-
-            if msg['type'] == 'request':
-                raw_response = yield from websocket.recv()
-                self.last_response = json.loads(raw_response)
-
-        finally:
-            logger.debug('close command connection to %s', self.get_url());
-            yield from websocket.close()
+        if msg['type'] == 'request':
+            raw_response = yield from self.web_socket.recv()
+            self.last_response = json.loads(raw_response)
 
     def command(self, request_type, uri, payload):
         """Build and send a command."""
@@ -195,16 +185,43 @@ class WebOsClient(object):
 
         self.last_response = None
 
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(asyncio.wait_for(self._command(message), self.timeout_connect, loop=loop))
-        finally:
-            loop.close()
+        loop = asyncio.get_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(asyncio.wait_for(self._command(message), self.timeout_connect, loop=loop))
 
     def request(self, uri, payload=None):
         """Send a request."""
         self.command('request', uri, payload)
+
+    @asyncio.coroutine
+    def _subscription(self, msg):
+        yield from self.web_socket_sub.send(json.dumps(msg))
+
+        if msg['type'] == 'subscribe':
+            res = yield from self.web_socket_sub.recv()
+
+    def subscription(self, uri, payload):
+        if payload is None:
+            payload = {}
+
+        cid = self.get_cid()
+        message = {
+            'id': cid,
+            'type': 'subscribe',
+            'uri': "ssap://{}".format(uri),
+            'payload': payload,
+        }
+
+        loop = asyncio.get_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(asyncio.wait_for(self._subscription(message), self.timeout_connect, loop=loop))
+
+        return cid
+
+    def subscribe(self, uri, callback):
+        """Subscribe to state changes"""
+        cid = self.subscription(uri, None)
+        self.subscribe_callbacks[cid] = callback
 
     def send_message(self, message, icon_path=None):
         """Show a floating message."""
@@ -221,7 +238,28 @@ class WebOsClient(object):
             'iconData': icon_encoded_string,
             'iconExtension': icon_extension
         })
+    
+    @asyncio.coroutine
+    def _get_evt(self):
+        res = yield from self.web_socket_sub.recv()
+        return res
 
+    def emit_events(self):
+        need_more = True
+        while (need_more):
+            evt = None
+            loop = asyncio.get_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                evt = loop.run_until_complete(asyncio.wait_for(self._get_evt(), 1, loop=loop))
+            except:
+                need_more = False
+
+            if evt:
+                evt = json.loads(evt)
+                callback = self.subscribe_callbacks[evt['id']]
+                callback(evt['payload'])
+        
     # Apps
     def get_apps(self):
         """Return all apps."""
@@ -312,6 +350,10 @@ class WebOsClient(object):
         """Get the current volume."""
         self.request(EP_GET_VOLUME)
         return 0 if self.last_response is None else self.last_response.get('payload').get('volume')
+
+    def subscribe_get_volume(self, callback):
+        """Subscribe to volume changes"""
+        return self.subscribe(EP_GET_VOLUME, callback)
 
     def set_volume(self, volume):
         """Set volume."""
